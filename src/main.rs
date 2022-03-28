@@ -11,11 +11,10 @@ use tinytemplate::TinyTemplate;
 use url::Url;
 
 use matrix_sdk::{
-    self,
     config::SyncSettings,
     room::Room,
     ruma::events::room::message::{
-        MessageEventContent, MessageType, SyncMessageEvent, TextMessageEventContent,
+        MessageType, RoomMessageEventContent, SyncRoomMessageEvent, TextMessageEventContent,
     },
     ruma::MilliSecondsSinceUnixEpoch,
     Client,
@@ -26,13 +25,15 @@ struct Context {
     last_triggered: String,
 }
 
-async fn on_room_message(event: SyncMessageEvent, room: Room, timestamp_storage: Arc<Mutex<MilliSecondsSinceUnixEpoch>>, re_string: String, trigger_string: String) {
+async fn on_room_message(event: SyncRoomMessageEvent, room: Room, timestamp_storage: Arc<Mutex<MilliSecondsSinceUnixEpoch>>, re_string: String, trigger_string: String) {
     if let Room::Joined(room_joined) = room {
 
         match event {
-            SyncMessageEvent {
+            // we are looking for this event type
+            // (I think) this specifies a text message
+            SyncRoomMessageEvent {
                 content:
-                MessageEventContent {
+                RoomMessageEventContent {
                     msgtype: MessageType::Text(TextMessageEventContent { body: msg_body, .. }),
                     ..
                 },
@@ -40,7 +41,7 @@ async fn on_room_message(event: SyncMessageEvent, room: Room, timestamp_storage:
                 sender,
                 ..
             } => {
-                // debugging section right here
+                // uncomment this to see debug output: the author and the message body
                 /*
                 let member = room_joined.get_member(&sender).await.unwrap().unwrap();
                 let name = member
@@ -50,7 +51,7 @@ async fn on_room_message(event: SyncMessageEvent, room: Room, timestamp_storage:
                 */
 
                 let mut update_timestamp = false;
-                let mut content: MessageEventContent = MessageEventContent::text_plain("");
+                let mut content: RoomMessageEventContent = RoomMessageEventContent::text_plain("");
                 {
 
                     let mut last_timestamp = timestamp_storage.lock().unwrap();
@@ -76,7 +77,7 @@ async fn on_room_message(event: SyncMessageEvent, room: Room, timestamp_storage:
                             // end template!
 
                             //let formatted_message = format!("<del>{}</del> 0 seconds without posting Shorts and {}", MilliSecondsSinceUnixEpoch::now().as_secs() - (*last_timestamp).as_secs(), trigger_string);
-                            content = MessageEventContent::text_html(formatted_message.clone(), formatted_message);
+                            content = RoomMessageEventContent::text_html(formatted_message.clone(), formatted_message);
                             *last_timestamp = origin_server_ts;
                             update_timestamp = true;
                         }
@@ -88,7 +89,7 @@ async fn on_room_message(event: SyncMessageEvent, room: Room, timestamp_storage:
                 }
             }
             _ => {
-                //println!("something else");
+                //println!("some other event type was sent that we don't care about");
             }
         }
     }
@@ -100,7 +101,7 @@ async fn login(
     password: &str,
 ) -> Result<(), matrix_sdk::Error> {
     let homeserver_url = Url::parse(&homeserver_url).expect("Couldn't parse the homeserver URL");
-    let client = Client::new(homeserver_url).unwrap();
+    let client = Client::new(homeserver_url).await.unwrap();
 
     let a: Arc<Mutex<MilliSecondsSinceUnixEpoch>> = Arc::new(Mutex::new(MilliSecondsSinceUnixEpoch(Default::default())));
 
