@@ -3,6 +3,7 @@ extern crate serde_derive;
 extern crate tinytemplate;
 
 use std::{env, process::exit};
+use std::convert::TryFrom;
 use std::sync::{Arc, Mutex};
 
 use regex::Regex;
@@ -17,21 +18,25 @@ use matrix_sdk::{
     ruma::events::room::message::{
         MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent, TextMessageEventContent,
     },
-    ruma::MilliSecondsSinceUnixEpoch,
+    ruma::{
+        MilliSecondsSinceUnixEpoch, UInt
+    },
     Client,
 };
 
 #[derive(Serialize)]
 struct Context {
     last_triggered: String,
+    trigger_today_count: usize,
+    first_trigger_today: bool,
 }
 
 struct Storage {
     last_timestamp: MilliSecondsSinceUnixEpoch,
-    count: usize,
+    timestamp_list: Vec<MilliSecondsSinceUnixEpoch>,
 }
 
-async fn on_room_message(event: OriginalSyncRoomMessageEvent, room: Room, storage: Arc<Mutex<Storage>>, re_string: String, trigger_string: String) {
+async fn on_room_message(event: OriginalSyncRoomMessageEvent, room: Room, storage: Arc<Mutex<Storage>>, trigger_string: String) {
     // copied from login.rs example
     if let Room::Joined(room_joined) = room {
 
@@ -55,40 +60,57 @@ async fn on_room_message(event: OriginalSyncRoomMessageEvent, room: Room, storag
                 println!("{}: {}", name, msg_body);
                 */
 
-                let mut update_timestamp = false;
+                let mut send_message = false;
                 let mut content: RoomMessageEventContent = RoomMessageEventContent::text_plain("");
                 {
                     let mut current_storage = storage.lock().unwrap();
-                    let re = Regex::new(&*re_string).unwrap();
+                    let re = Regex::new(&*trigger_string).unwrap();
 
                     if re.is_match(&msg_body) {
-                        if (*current_storage).last_timestamp == MilliSecondsSinceUnixEpoch(Default::default()) {
-                            (*current_storage).last_timestamp = origin_server_ts;
-                        } else {
-                            // template! to format message
-                            let template = "<del>{last_triggered}</del> 0 seconds without posting Shorts";
+                        // if bot has been triggered at least once before
+                        if (*current_storage).last_timestamp != MilliSecondsSinceUnixEpoch(Default::default()) {
+                            // calculate number of times triggered today
+                            let mut times_triggered_today: usize = 0;
+                            let unix_secs_one_day_ago: UInt = MilliSecondsSinceUnixEpoch::now().as_secs() - UInt::try_from(86400).unwrap();
+                            for this_timestamp in (*current_storage).timestamp_list.iter().rev() {
+                                if this_timestamp.as_secs() > unix_secs_one_day_ago {
+                                    // if this trigger happened within the last day, count it
+                                    times_triggered_today += 1;
+                                } else {
+                                    // otherwise, we can stop counting (we use .rev() to start from the end)
+                                    break;
+                                }
+                            }
 
+                            // set up TinyTemplate
                             let mut tt = TinyTemplate::new();
-                            tt.add_template("standard_template", template).unwrap();
+                            const TEMPLATE: &str = "<del>{last_triggered}</del> 0 seconds without posting Shorts<br>{{ if first_trigger_today }}This is the first time you've posted Shorts in the past day!{{ else }}You've posted Shorts {trigger_today_count} times in the past day!{{ endif }}";
+                            tt.add_template("standard_template", TEMPLATE).unwrap();
 
+                            // set up template arguments
                             let context = Context {
                                 last_triggered: (MilliSecondsSinceUnixEpoch::now().as_secs() - ((*current_storage).last_timestamp).as_secs()).to_string(),
+                                // account for THIS trigger
+                                trigger_today_count: times_triggered_today + 1,
+                                first_trigger_today: times_triggered_today == 0,
                             };
 
+                            // render message based on template
                             let formatted_message = tt.render("standard_template", &context).unwrap();
 
-
-                            // end template!
-
-                            //let formatted_message = format!("<del>{}</del> 0 seconds without posting Shorts and {}", MilliSecondsSinceUnixEpoch::now().as_secs() - (*last_timestamp).as_secs(), trigger_string);
+                            // prepare message for sending
                             content = RoomMessageEventContent::text_html(formatted_message.clone(), formatted_message);
-                            (*current_storage).last_timestamp = origin_server_ts;
-                            update_timestamp = true;
+                            send_message = true;
                         }
+
+                        // update storage, take THIS trigger into account
+                        (*current_storage).timestamp_list.push(origin_server_ts);
+                        (*current_storage).last_timestamp = origin_server_ts;
                     }
                 }
 
-                if update_timestamp {
+                // actually post message event
+                if send_message {
                     room_joined.send(content, None).await.unwrap();
                 }
             }
@@ -109,11 +131,11 @@ async fn login(
 
     let a: Arc<Mutex<Storage>> = Arc::new(
         Mutex::new(
-            Storage { last_timestamp: MilliSecondsSinceUnixEpoch(Default::default()), count: 0 }
+            Storage { last_timestamp: MilliSecondsSinceUnixEpoch(Default::default()), timestamp_list: vec![] }
         )
     );
 
-    client.register_event_handler(move |ev, room| on_room_message(ev, room, a.clone(), r"youtube\.com/shorts".to_string(), "khdsfkjd".to_string())).await;
+    client.register_event_handler(move |ev, room| on_room_message(ev, room, a.clone(), r"youtube\.com/shorts".to_string())).await;
 
     client.login(username, password, None, Some("rust-sdk")).await?;
     client.sync(SyncSettings::new()).await;
