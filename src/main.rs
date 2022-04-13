@@ -11,10 +11,11 @@ use tinytemplate::TinyTemplate;
 use url::Url;
 
 use matrix_sdk::{
+    self,
     config::SyncSettings,
     room::Room,
     ruma::events::room::message::{
-        MessageType, RoomMessageEventContent, SyncRoomMessageEvent, TextMessageEventContent,
+        MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent, TextMessageEventContent,
     },
     ruma::MilliSecondsSinceUnixEpoch,
     Client,
@@ -25,13 +26,17 @@ struct Context {
     last_triggered: String,
 }
 
-async fn on_room_message(event: SyncRoomMessageEvent, room: Room, timestamp_storage: Arc<Mutex<MilliSecondsSinceUnixEpoch>>, re_string: String, trigger_string: String) {
+struct Storage {
+    last_timestamp: MilliSecondsSinceUnixEpoch,
+    count: usize,
+}
+
+async fn on_room_message(event: OriginalSyncRoomMessageEvent, room: Room, storage: Arc<Mutex<Storage>>, re_string: String, trigger_string: String) {
+    // copied from login.rs example
     if let Room::Joined(room_joined) = room {
 
         match event {
-            // we are looking for this event type
-            // (I think) this specifies a text message
-            SyncRoomMessageEvent {
+            OriginalSyncRoomMessageEvent {
                 content:
                 RoomMessageEventContent {
                     msgtype: MessageType::Text(TextMessageEventContent { body: msg_body, .. }),
@@ -53,13 +58,12 @@ async fn on_room_message(event: SyncRoomMessageEvent, room: Room, timestamp_stor
                 let mut update_timestamp = false;
                 let mut content: RoomMessageEventContent = RoomMessageEventContent::text_plain("");
                 {
-
-                    let mut last_timestamp = timestamp_storage.lock().unwrap();
+                    let mut current_storage = storage.lock().unwrap();
                     let re = Regex::new(&*re_string).unwrap();
 
                     if re.is_match(&msg_body) {
-                        if *last_timestamp == MilliSecondsSinceUnixEpoch(Default::default()) {
-                            *last_timestamp = origin_server_ts;
+                        if (*current_storage).last_timestamp == MilliSecondsSinceUnixEpoch(Default::default()) {
+                            (*current_storage).last_timestamp = origin_server_ts;
                         } else {
                             // template! to format message
                             let template = "<del>{last_triggered}</del> 0 seconds without posting Shorts";
@@ -68,7 +72,7 @@ async fn on_room_message(event: SyncRoomMessageEvent, room: Room, timestamp_stor
                             tt.add_template("standard_template", template).unwrap();
 
                             let context = Context {
-                                last_triggered: (MilliSecondsSinceUnixEpoch::now().as_secs() - (*last_timestamp).as_secs()).to_string(),
+                                last_triggered: (MilliSecondsSinceUnixEpoch::now().as_secs() - ((*current_storage).last_timestamp).as_secs()).to_string(),
                             };
 
                             let formatted_message = tt.render("standard_template", &context).unwrap();
@@ -78,7 +82,7 @@ async fn on_room_message(event: SyncRoomMessageEvent, room: Room, timestamp_stor
 
                             //let formatted_message = format!("<del>{}</del> 0 seconds without posting Shorts and {}", MilliSecondsSinceUnixEpoch::now().as_secs() - (*last_timestamp).as_secs(), trigger_string);
                             content = RoomMessageEventContent::text_html(formatted_message.clone(), formatted_message);
-                            *last_timestamp = origin_server_ts;
+                            (*current_storage).last_timestamp = origin_server_ts;
                             update_timestamp = true;
                         }
                     }
@@ -103,7 +107,11 @@ async fn login(
     let homeserver_url = Url::parse(&homeserver_url).expect("Couldn't parse the homeserver URL");
     let client = Client::new(homeserver_url).await.unwrap();
 
-    let a: Arc<Mutex<MilliSecondsSinceUnixEpoch>> = Arc::new(Mutex::new(MilliSecondsSinceUnixEpoch(Default::default())));
+    let a: Arc<Mutex<Storage>> = Arc::new(
+        Mutex::new(
+            Storage { last_timestamp: MilliSecondsSinceUnixEpoch(Default::default()), count: 0 }
+        )
+    );
 
     client.register_event_handler(move |ev, room| on_room_message(ev, room, a.clone(), r"youtube\.com/shorts".to_string(), "khdsfkjd".to_string())).await;
 
