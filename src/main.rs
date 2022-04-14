@@ -19,7 +19,7 @@ use matrix_sdk::{
         MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent, TextMessageEventContent,
     },
     ruma::{
-        MilliSecondsSinceUnixEpoch, UInt
+        MilliSecondsSinceUnixEpoch, UInt,
     },
     Client,
 };
@@ -34,17 +34,17 @@ struct Context {
 struct Storage {
     last_timestamp: MilliSecondsSinceUnixEpoch,
     timestamp_list: Vec<MilliSecondsSinceUnixEpoch>,
+    last_reply: String,
 }
 
-async fn on_room_message(event: OriginalSyncRoomMessageEvent, room: Room, storage: Arc<Mutex<Storage>>, trigger_string: String) {
+async fn on_room_message(event: OriginalSyncRoomMessageEvent, room: Room, storage: Arc<Mutex<Storage>>, trigger_shorts: String, trigger_reply: String) {
     // copied from login.rs example
     if let Room::Joined(room_joined) = room {
-
         match event {
             OriginalSyncRoomMessageEvent {
                 content:
                 RoomMessageEventContent {
-                    msgtype: MessageType::Text(TextMessageEventContent { body: msg_body, .. }),
+                    msgtype: MessageType::Text(TextMessageEventContent { body: msg_body, formatted: formatted_body, .. }),
                     ..
                 },
                 origin_server_ts,
@@ -57,16 +57,31 @@ async fn on_room_message(event: OriginalSyncRoomMessageEvent, room: Room, storag
                 let name = member
                     .display_name()
                     .unwrap_or_else(|| member.user_id().as_str());
-                println!("{}: {}", name, msg_body);
+                println!("PLAIN {}: {}", name, msg_body);
+                println!("FORMATTED {}: {}", name, formatted_body.unwrap().body);
                 */
 
                 let mut send_message = false;
                 let mut content: RoomMessageEventContent = RoomMessageEventContent::text_plain("");
                 {
+                    // set up storage and regular expressions
                     let mut current_storage = storage.lock().unwrap();
-                    let re = Regex::new(&*trigger_string).unwrap();
+                    let trigger_re = Regex::new(&*trigger_shorts).unwrap();
+                    let reply_re = Regex::new(&*trigger_reply).unwrap();
 
-                    if re.is_match(&msg_body) {
+                    // handle replies
+                    if let Some(fmted_body) = formatted_body {
+                        if let Some(caps) = reply_re.captures(&fmted_body.body) {
+                            // this should be our reply link - store it
+                            (*current_storage).last_reply = caps.get(1).unwrap().as_str().parse().unwrap();
+                        }
+                    } else if msg_body == ".r" && (*current_storage).last_reply != String::new() {
+                        // prepare message for sending
+                        content = RoomMessageEventContent::text_plain(&(*current_storage).last_reply);
+                        send_message = true;
+                    }
+                    // handle Shorts trigger
+                    else if trigger_re.is_match(&msg_body) {
                         // if bot has been triggered at least once before
                         if (*current_storage).last_timestamp != MilliSecondsSinceUnixEpoch(Default::default()) {
                             // calculate number of times triggered today
@@ -131,11 +146,15 @@ async fn login(
 
     let a: Arc<Mutex<Storage>> = Arc::new(
         Mutex::new(
-            Storage { last_timestamp: MilliSecondsSinceUnixEpoch(Default::default()), timestamp_list: vec![] }
+            Storage {
+                last_timestamp: MilliSecondsSinceUnixEpoch(Default::default()),
+                timestamp_list: vec![],
+                last_reply: String::new(),
+            }
         )
     );
 
-    client.register_event_handler(move |ev, room| on_room_message(ev, room, a.clone(), r"youtube\.com/shorts".to_string())).await;
+    client.register_event_handler(move |ev, room| on_room_message(ev, room, a.clone(), r"youtube\.com/shorts".to_string(), r###"(https://matrix\.to/#/.*?)(?:\?|")"###.to_string())).await;
 
     client.login(username, password, None, Some("rust-sdk")).await?;
     client.sync(SyncSettings::new()).await;
